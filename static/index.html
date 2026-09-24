@@ -16,6 +16,8 @@
         系统联立全部区间：若互相矛盾，给出由<strong>原始行号与上下界</strong>构成的闭合矛盾链，
         并可进一步给出<strong>冲突单行修订建议</strong>——只放宽某一行的一个端点即可消除矛盾的最小改动；
         否则给出以最早事件为第 0 分钟的可行时间线。
+        另可粘贴多行<strong>绝对时间锚点</strong>（<code>事件名,YYYY-MM-DD HH:MM</code>）做<strong>锚定求解</strong>：
+        把每个锚点作为事件相对统一零点的等式联立，为与锚点连通的事件给出绝对日期时刻，其余标为“未定位”。
         此外可任选一条原始行做<strong>约束冗余核对</strong>：删去该行后，检验其余叙述是否仍必然满足它的时间差区间；
         也可把<strong>基准版与修订版</strong>两版文本分别粘贴做<strong>两版比较</strong>：按事件名对齐，给出新增、删除事件与共同事件的分钟变化及修订行证据。
       </p>
@@ -32,6 +34,26 @@
         <button id="btn-clear" class="ghost">清空</button>
       </div>
     </section>
+
+    <section class="input-area">
+      <label for="anchor-input"><strong>绝对时间锚点（每行一条，可选）</strong></label>
+      <p class="muted" style="margin-top:0">
+        每行输入 <code>事件名,YYYY-MM-DD HH:MM</code>（同一无时区的本地时间，精确到分钟）。
+        后端把每个锚点作为该事件相对<strong>统一零点</strong>的等式，与上方区间一起联立：
+        可解时只为<strong>与锚点连通</strong>的事件显示绝对日期时刻，其余事件标为<strong>“未定位”</strong>（不给任何日期）；
+        锚点与区间或彼此矛盾时，给出含<strong>区间行号、锚点行号与所用界值</strong>的闭合矛盾链。
+        同名锚点重复填写也会参与判定（同一事件两个不同时刻即互相矛盾）。
+      </p>
+      <textarea id="anchor-input" rows="4" spellcheck="false"
+        placeholder="起床,2024-03-05 07:30&#10;开会,2024-03-05 09:00"></textarea>
+      <div class="button-row">
+        <button id="btn-anchor" class="primary">锚定求解</button>
+        <button id="btn-anchor-example">填入锚定示例</button>
+        <button id="btn-anchor-clear" class="ghost">清空锚点</button>
+      </div>
+    </section>
+
+    <section id="anchor-result" aria-live="polite"></section>
 
     <section class="input-area">
       <label for="redundancy-line"><strong>约束冗余核对</strong></label>

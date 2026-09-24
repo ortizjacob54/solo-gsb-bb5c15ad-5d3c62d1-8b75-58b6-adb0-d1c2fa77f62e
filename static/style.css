@@ -135,6 +135,15 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 }
 .tag.upper { background: #e6eef9; color: #2b5d8a; }
 .tag.lower { background: #f3e8f2; color: #7a3570; }
+.tag.anchor { background: #e4f0ee; color: #1f6a5c; }
+
+/* 绝对时间锚定：未定位事件 */
+.unlocated-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0 8px;
+}
 
 /* 矛盾链 */
 .chain {

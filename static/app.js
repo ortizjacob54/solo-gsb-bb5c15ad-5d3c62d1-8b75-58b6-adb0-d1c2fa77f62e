@@ -37,6 +37,23 @@ const EXAMPLE_COMPARE_REVISED = [
   "午休,下班,60,120",
 ].join("\n");
 
+// 锚定示例：在可行示例基础上加一条与锚点不连通的“午睡→散步”分量（演示“未定位”）；
+// 锚点给出起床与开会的绝对时刻（相距 90 分钟，落在第 5 行区间 [80,240] 内）。
+const EXAMPLE_ANCHOR_TEXT = [
+  "起床,洗漱,10,30",
+  "洗漱,早饭,15,45",
+  "早饭,出门,20,60",
+  "出门,开会,40,90",
+  "起床,开会,80,240",
+  "起床,早饭,25,90",
+  "午睡,散步,20,60",
+].join("\n");
+
+const EXAMPLE_ANCHORS = [
+  "起床,2024-03-05 07:30",
+  "开会,2024-03-05 09:00",
+].join("\n");
+
 const $ = (id) => document.getElementById(id);
 const resultEl = $("result");
 const redundancyEl = $("redundancy-result");
@@ -46,6 +63,8 @@ const lineSelect = $("redundancy-line");
 const compareEl = $("compare-result");
 const baseEl = $("compare-base");
 const revisedEl = $("compare-revised");
+const anchorInputEl = $("anchor-input");
+const anchorResultEl = $("anchor-result");
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
@@ -118,9 +137,26 @@ function renderOk(data) {
     </div>`;
 }
 
+// 矛盾链/推导路径步骤的来源标注：区间行显示“第 N 行 + 界值”，锚点行显示“锚点第 N 行 + 日期时刻”
+function stepTagHtml(s) {
+  if (s.source === "anchor") {
+    return `<span class="tag anchor">锚点第 ${s.line} 行 · ${esc(s.kind_label)} ${esc(s.datetime)}</span>`;
+  }
+  return `<span class="tag ${s.kind}">第 ${s.line} 行 · ${esc(s.kind_label)} ${s.bound}</span>`;
+}
+
+function stepLineText(s) {
+  return s.source === "anchor" ? `锚点第 ${s.line} 行` : `第 ${s.line} 行`;
+}
+
+function stepBoundHtml(s) {
+  return s.source === "anchor" ? esc(s.datetime) : s.bound;
+}
+
 function renderConflict(data, target = resultEl) {
   const c = data.conflict;
   const steps = c.steps;
+  const hasAnchor = steps.some((s) => s.source === "anchor");
 
   // 链式图：事件节点 + 行号/界值标注，最后回到起点形成闭合环
   const parts = [];
@@ -128,7 +164,7 @@ function renderConflict(data, target = resultEl) {
     if (i === 0) parts.push(`<div class="chain-node">${esc(s.from)}</div>`);
     parts.push(`
       <div class="chain-edge">
-        <span class="tag ${s.kind}">第 ${s.line} 行 · ${esc(s.kind_label)} ${s.bound}</span>
+        ${stepTagHtml(s)}
         <span class="rel">${esc(s.relation)}</span>
         <span class="chain-arrow">→</span>
       </div>
@@ -143,17 +179,17 @@ function renderConflict(data, target = resultEl) {
 
   const detailRows = steps.map((s) => `
     <tr>
-      <td class="num">${s.line}</td>
+      <td class="num">${esc(stepLineText(s))}</td>
       <td>${esc(s.from)} → ${esc(s.to)}</td>
-      <td><span class="tag ${s.kind}">${esc(s.kind_label)}</span></td>
-      <td class="num">${s.bound}</td>
+      <td><span class="tag ${s.source === "anchor" ? "anchor" : s.kind}">${esc(s.kind_label)}</span></td>
+      <td class="num">${stepBoundHtml(s)}</td>
       <td>${esc(s.relation)}</td>
     </tr>`).join("");
 
   target.innerHTML = `
     <div class="banner conflict">
-      <h2>✗ 区间存在冲突（闭合矛盾链）</h2>
-      <p>下列 ${steps.length} 条原始行首尾相接形成闭合环，环上界值相加为负数
+      <h2>✗ ${hasAnchor ? "区间与锚点存在冲突" : "区间存在冲突"}（闭合矛盾链）</h2>
+      <p>下列 ${steps.length} 条${hasAnchor ? "约束（区间行与锚点行）" : "原始行"}首尾相接形成闭合环，环上界值相加为负数
       （<strong>${c.weight_sum} &lt; 0</strong>），即推出“某事件必须早于自己”，无任何时间线可同时满足。</p>
     </div>
     <div class="card">
@@ -161,7 +197,7 @@ function renderConflict(data, target = resultEl) {
       <div class="chain">${parts.join("")}</div>
     </div>
     <div class="card">
-      <h3>涉及的原始行与上下界</h3>
+      <h3>涉及的原始行与所用界值</h3>
       <table>
         <thead><tr>
           <th class="num">行号</th><th>图中方向</th><th>使用的界</th>
@@ -169,7 +205,9 @@ function renderConflict(data, target = resultEl) {
         </tr></thead>
         <tbody>${detailRows}</tbody>
       </table>
-      <p class="muted">“上界”取该行最多分钟（事件乙 − 事件甲 ≤ 上界）；“下界”取该行最少分钟（事件乙 − 事件甲 ≥ 下界）。</p>
+      <p class="muted">“上界”取该行最多分钟（事件乙 − 事件甲 ≤ 上界）；“下界”取该行最少分钟（事件乙 − 事件甲 ≥ 下界）。${hasAnchor
+        ? "“锚点”取该锚点行的日期时刻：事件 − 统一零点 = 锚点分钟，拆成“不晚于 / 不早于”两条等式边参与联立。"
+        : ""}</p>
     </div>`;
 }
 
@@ -191,6 +229,113 @@ async function solve() {
       <div class="banner err"><h2>请求失败</h2><p>${esc(err.message)}</p></div>`;
   }
 }
+
+// ---------- 绝对时间锚定 ----------
+
+function renderAnchorOk(data) {
+  const locatedRows = data.timeline.map((t) => `
+    <tr>
+      <td>${esc(t.event)}</td>
+      <td class="num">${esc(t.datetime)}</td>
+      <td class="num">${t.minute}</td>
+    </tr>`).join("");
+
+  const checks = data.differences.map((d) => {
+    const fit = d.low <= d.actual && d.actual <= d.high;
+    return `<tr>
+      <td class="num">${d.line}</td>
+      <td>${esc(d.a)} → ${esc(d.b)}</td>
+      <td class="num">[${d.low}, ${d.high}]</td>
+      <td class="num">${d.actual}</td>
+      <td>${fit ? '<span class="ok-text">满足</span>' : '<span style="color:var(--err)">不满足</span>'}</td>
+    </tr>`;
+  }).join("");
+
+  const anchorRows = data.anchors.map((a) => `
+    <tr>
+      <td class="num">${a.line}</td>
+      <td>${esc(a.event)}</td>
+      <td class="num">${esc(a.datetime)}</td>
+    </tr>`).join("");
+
+  const unlocatedCard = data.unlocated_count ? `
+    <div class="card">
+      <h3>未定位事件（${data.unlocated_count}）</h3>
+      <p class="unlocated-list">${data.unlocated.map((n) => `<span class="kind-tag incomparable">${esc(n)}</span>`).join(" ")}</p>
+      <p class="muted">这些事件与任何锚点都不连通：区间只能给出相对先后，给不出真实日期，故标为“未定位”——
+      不把任何平移量当作日期展示。为它们补充锚点，或补上与已定位事件的区间约束后即可定位。</p>
+    </div>` : "";
+
+  anchorResultEl.innerHTML = `
+    <div class="banner ok">
+      <h2>✓ 锚定完成</h2>
+      <p>共 ${data.event_count} 个事件、${data.line_count} 条区间约束、${data.anchor_count} 条锚点：
+      <strong>${data.located_count}</strong> 个事件与锚点连通，已给出绝对日期时刻${data.unlocated_count
+        ? `；<strong>${data.unlocated_count}</strong> 个事件未定位`
+        : "，全部事件均已定位"}。
+      日期按同一无时区本地时间处理、精确到分钟；所示时刻为满足全部约束的一组可行解。</p>
+    </div>
+    <div class="card">
+      <h3>绝对时间线（与锚点连通的事件）</h3>
+      <table>
+        <thead><tr><th>事件</th><th class="num">绝对日期时刻</th><th class="num">相对统一零点（分钟）</th></tr></thead>
+        <tbody>${locatedRows}</tbody>
+      </table>
+      <p class="muted">统一零点为 1970-01-01 00:00（无时区本地时间）；同一连通分量内事件的相对差值与区间约束一致。</p>
+    </div>
+    ${unlocatedCard}
+    <div class="card">
+      <h3>锚点清单</h3>
+      <table>
+        <thead><tr><th class="num">锚点行号</th><th>事件</th><th class="num">日期时刻</th></tr></thead>
+        <tbody>${anchorRows}</tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h3>逐条核对（区间约束）</h3>
+      <table>
+        <thead><tr>
+          <th class="num">行号</th><th>事件对</th><th class="num">要求区间</th>
+          <th class="num">本时间线差值</th><th>结果</th>
+        </tr></thead>
+        <tbody>${checks}</tbody>
+      </table>
+    </div>`;
+}
+
+async function solveAnchored() {
+  anchorResultEl.innerHTML = `<div class="card muted">锚定联立中…</div>`;
+  try {
+    const resp = await fetch("/api/anchor", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: inputEl.value, anchors: anchorInputEl.value }),
+    });
+    const data = await resp.json();
+    if (data.status === "ok") renderAnchorOk(data);
+    else if (data.status === "conflict") renderConflict(data, anchorResultEl);
+    else renderErrors(data.errors || [{ line: null, message: "未知错误。" }], anchorResultEl);
+  } catch (err) {
+    anchorResultEl.innerHTML = `
+      <div class="banner err"><h2>请求失败</h2><p>${esc(err.message)}</p></div>`;
+  }
+}
+
+$("btn-anchor").addEventListener("click", solveAnchored);
+$("btn-anchor-example").addEventListener("click", () => {
+  inputEl.value = EXAMPLE_ANCHOR_TEXT;
+  anchorInputEl.value = EXAMPLE_ANCHORS;
+  refreshLineOptions();
+  solveAnchored();
+});
+$("btn-anchor-clear").addEventListener("click", () => {
+  anchorInputEl.value = "";
+  anchorResultEl.innerHTML = "";
+  anchorInputEl.focus();
+});
+anchorInputEl.addEventListener("input", () => {
+  anchorResultEl.innerHTML = "";  // 锚点已变，旧的锚定结果作废
+});
 
 // ---------- 约束冗余核对 ----------
 
@@ -501,6 +646,7 @@ $("btn-clear").addEventListener("click", () => {
   resultEl.innerHTML = "";
   redundancyEl.innerHTML = "";
   repairEl.innerHTML = "";
+  anchorResultEl.innerHTML = "";
   refreshLineOptions();
   inputEl.focus();
 });
@@ -509,6 +655,7 @@ inputEl.addEventListener("input", () => {
   refreshLineOptions();
   redundancyEl.innerHTML = "";  // 文本已变，旧的冗余结论作废
   repairEl.innerHTML = "";      // 文本已变，旧的修订建议作废
+  anchorResultEl.innerHTML = "";  // 文本已变，旧的锚定结果作废
 });
 refreshLineOptions();
 

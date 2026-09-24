@@ -1,5 +1,5 @@
 """FastAPI 入口：提供静态页面与 /api/solve 联立求解、/api/redundancy 约束冗余核对、
-/api/compare 两版比较、/api/repair 冲突单行修订建议接口。"""
+/api/compare 两版比较、/api/repair 冲突单行修订建议、/api/anchor 绝对时间锚定接口。"""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .solver import check_redundancy, compare_texts, solve, suggest_repairs
+from .solver import check_redundancy, compare_texts, solve, solve_anchored, suggest_repairs
 
-app = FastAPI(title="口述史事件时间线核对", version="1.3.0")
+app = FastAPI(title="口述史事件时间线核对", version="1.4.0")
 
 
 class SolveRequest(BaseModel):
@@ -25,6 +25,11 @@ class RedundancyRequest(BaseModel):
 class CompareRequest(BaseModel):
     base: str = ""
     revised: str = ""
+
+
+class AnchorRequest(BaseModel):
+    text: str = ""
+    anchors: str = ""
 
 
 @app.get("/api/health")
@@ -52,6 +57,13 @@ def api_compare(req: CompareRequest) -> dict:
 def api_repair(req: SolveRequest) -> dict:
     # 冲突单行修订建议：复用现有解析与求解；输入错误返回逐行错误，原文本可解时说明无需修订
     return suggest_repairs(req.text or "")
+
+
+@app.post("/api/anchor")
+def api_anchor(req: AnchorRequest) -> dict:
+    # 绝对时间锚定：区间文本与锚点文本分别校验后联立；锚点作为事件相对统一零点的等式，
+    # 可解时只为与锚点连通的事件返回绝对日期时刻，其余标为“未定位”
+    return solve_anchored(req.text or "", req.anchors or "")
 
 
 @app.get("/")
