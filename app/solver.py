@@ -27,14 +27,38 @@
 时间差的最紧可行区间，只放宽该行一个端点至首次相交的整数分钟（区间含整数端点，
 最小改动即“移到边界”），给出最小改动量、替换后的整行，以及迫使该端点移动的
 原始行号与界值推导链；建议按改动分钟数、原始行号排序，无单行修复时明确提示。
+
+绝对时间锚定（solve_anchored）：每条锚点行“事件名,YYYY-MM-DD HH:MM”按同一无时区
+本地时间换算为相对统一零点（公历 0001-01-01 00:00）的分钟数 M，引入零点节点 ZERO
+与一对等式边（ZERO->事件 权 M、事件->ZERO 权 -M，即“事件相对零点的等式”），与区间行
+复用同一套差分约束 Bellman-Ford 联立；同名锚点重复也作为两条等式参与判定（时刻不同
+即构成负环）。冲突时闭合矛盾链同时标注区间行号、锚点行号及所用界值；可解时不取任何
+任意平移的可行解充当真实日期，而是对每个事件用冗余核对同款单源最短路求其相对零点的
+最紧下界/上界：仅与锚点连通（两端都有界）的事件给出绝对日期时刻（精确点或范围），
+其余事件标为“未定位”。
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 _INT_RE = re.compile(r"^[+-]?\d+$")
+
+# 绝对时间锚定：统一零点（无时区本地时间）与图中零点节点的内部名。
+# 内部名以 \x00 开头，用户事件名不可能与之撞名；对外展示统一映射为 ZERO_DISPLAY。
+ZERO_DT = datetime(1, 1, 1, 0, 0)
+ZERO_NODE = "\x00zero"
+ZERO_DISPLAY = "统一零点"
+
+# 锚点日期时间格式：YYYY-MM-DD HH:MM（允许任意空白分隔日期与时刻）
+_ANCHOR_DT_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$")
+
+
+def _display_name(name: str) -> str:
+    """图中内部节点名转对外显示名（零点节点显示为“统一零点”）。"""
+    return ZERO_DISPLAY if name == ZERO_NODE else name
 
 
 @dataclass(frozen=True)
@@ -52,8 +76,18 @@ class Edge:
     v: int
     w: int
     line: int
-    kind: str  # "upper"（上界边）或 "lower"（下界边）
-    bound: int  # 原始行中的界值（上界为 high，下界为 low）
+    kind: str  # "upper"（上界边）、"lower"（下界边）或 "anchor"（锚点等式边）
+    bound: int  # 原始行中的界值（上界为 high，下界为 low；锚点边为相对零点的分钟数）
+    source: str = "interval"  # "interval"（区间行）或 "anchor"（锚点行）
+    label: str = ""  # 锚点边展示用的日期时刻文本（YYYY-MM-DD HH:MM）
+
+
+@dataclass(frozen=True)
+class Anchor:
+    line: int
+    event: str
+    minute: int  # 相对统一零点 ZERO_DT 的分钟数
+    text: str  # 规范化后的日期时刻文本（YYYY-MM-DD HH:MM）
 
 
 def _parse_int(token: str, field: str, line: int) -> tuple[int | None, str | None]:
@@ -111,7 +145,25 @@ def parse_text(text: str) -> tuple[list[Row], list[dict]]:
 
 
 def _edge_step(names: list[str], e: Edge) -> dict:
-    """把一条约束边还原为可读步骤：原始行号、方向、所用界（上/下界）与界值。"""
+    """把一条约束边还原为可读步骤：来源（区间行/锚点行）、原始行号、方向、所用界与界值。"""
+    if e.kind == "anchor":
+        # 锚点等式边：ZERO->事件 权 M（不晚于锚定时刻）或 事件->ZERO 权 -M（不早于锚定时刻）
+        if names[e.u] == ZERO_NODE:
+            relation = f"{names[e.v]} 不晚于 {e.label}（锚定时刻）"
+        else:
+            relation = f"{names[e.u]} 不早于 {e.label}（锚定时刻）"
+        return {
+            "from": _display_name(names[e.u]),
+            "to": _display_name(names[e.v]),
+            "weight": e.w,
+            "line": e.line,
+            "kind": e.kind,
+            "kind_label": "锚点",
+            "bound": e.bound,
+            "source": "anchor",
+            "anchor_time": e.label,
+            "relation": relation,
+        }
     if e.kind == "upper":
         relation = f"{names[e.v]}−{names[e.u]} ≤ {e.bound}"
         kind_label = "上界（最多）"
@@ -120,13 +172,14 @@ def _edge_step(names: list[str], e: Edge) -> dict:
         relation = f"{names[e.u]}−{names[e.v]} ≥ {e.bound}"
         kind_label = "下界（最少）"
     return {
-        "from": names[e.u],
-        "to": names[e.v],
+        "from": _display_name(names[e.u]),
+        "to": _display_name(names[e.v]),
         "weight": e.w,
         "line": e.line,
         "kind": e.kind,
         "kind_label": kind_label,
         "bound": e.bound,
+        "source": "interval",
         "relation": relation,
     }
 
@@ -149,13 +202,11 @@ def _build_graph(rows: list[Row]) -> tuple[list[str], dict[str, int], list[Edge]
     return names, index, edges
 
 
-def solve_rows(rows: list[Row]) -> dict:
-    """对已通过校验的行联立 Bellman-Ford，返回内部求解结构（供 solve / 冗余核对 / 两版比较复用）。
+def _relax_all(names: list[str], edges: list[Edge]) -> tuple[list[int], list[tuple[int, Edge] | None], int | None]:
+    """全源 Bellman-Ford：所有距离初始化为 0（等价于虚拟源向每个顶点连权 0 的边）。
 
-    成功时含 rows/names/index/edges/dist/minutes（minutes 已平移到最早事件为 0）；
-    存在负环时直接返回 _conflict_result 的公开矛盾链结构。
+    返回 (dist, pred, last_relaxed)；last_relaxed 非 None 表示第 N 轮仍可松弛，即存在负环。
     """
-    names, index, edges = _build_graph(rows)
     n = len(names)
     dist = [0] * n
     pred: list[tuple[int, Edge] | None] = [None] * n
@@ -174,13 +225,24 @@ def solve_rows(rows: list[Row]) -> dict:
                     last_relaxed = e.v
         if not relaxed:
             break
+    return dist, pred, last_relaxed
+
+
+def solve_rows(rows: list[Row]) -> dict:
+    """对已通过校验的行联立 Bellman-Ford，返回内部求解结构（供 solve / 冗余核对 / 两版比较复用）。
+
+    成功时含 rows/names/index/edges/dist/minutes（minutes 已平移到最早事件为 0）；
+    存在负环时直接返回 _conflict_result 的公开矛盾链结构。
+    """
+    names, index, edges = _build_graph(rows)
+    dist, pred, last_relaxed = _relax_all(names, edges)
 
     if last_relaxed is not None:
-        return _conflict_result(names, pred, last_relaxed, n)
+        return _conflict_result(names, pred, last_relaxed, len(names))
 
     # 平移使最早事件落在第 0 分钟（差值不变，约束全部保留）
     base = min(dist)
-    minutes = [dist[i] - base for i in range(n)]
+    minutes = [dist[i] - base for i in range(len(names))]
     return {
         "status": "ok",
         "rows": rows,
@@ -663,5 +725,169 @@ def suggest_repairs(text: str) -> dict:
         "suggestion_count": len(suggestions),
         "checked_lines": len(rows),
         "event_count": len(names),
+        "line_count": len(rows),
+    }
+
+
+# ---------- 绝对时间锚定 ----------
+
+def _dt_to_minute(dt: datetime) -> int:
+    """无时区本地日期时刻转相对统一零点 ZERO_DT 的分钟数（整数运算，无浮点误差）。"""
+    delta = dt - ZERO_DT
+    return delta.days * 1440 + delta.seconds // 60
+
+
+def _minute_to_text(minute: int) -> str | None:
+    """相对零点的分钟数转回 “YYYY-MM-DD HH:MM”；超出 datetime 可表示范围时返回 None。"""
+    try:
+        dt = ZERO_DT + timedelta(minutes=minute)
+    except OverflowError:
+        return None
+    return f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d} {dt.hour:02d}:{dt.minute:02d}"
+
+
+def parse_anchors(text: str) -> tuple[list[Anchor], list[dict]]:
+    """按行解析锚点：事件名,YYYY-MM-DD HH:MM（同一无时区本地时间，精确到分钟）。
+
+    返回 (有效锚点, 错误列表)；空行跳过但行号保留为锚点文本的原始行号。
+    """
+    errors: list[dict] = []
+    anchors: list[Anchor] = []
+
+    if not text or not text.strip():
+        return anchors, [{"line": None, "message": "锚点输入为空：请粘贴“事件名,YYYY-MM-DD HH:MM”格式的多行文本。"}]
+
+    for line_no, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line:
+            continue  # 空行不计入校验，但行号保留为锚点文本的原始行号
+
+        # 兼容中文逗号
+        parts = [p.strip() for p in line.replace("，", ",").split(",")]
+        if len(parts) != 2:
+            errors.append({
+                "line": line_no,
+                "message": f"锚点第{line_no}行：应为 2 个字段（事件名,YYYY-MM-DD HH:MM），实际得到 {len(parts)} 个。",
+            })
+            continue
+
+        name, dt_s = parts
+        if not name:
+            errors.append({"line": line_no, "message": f"锚点第{line_no}行：事件名为空。"})
+            continue
+
+        m = _ANCHOR_DT_RE.match(dt_s)
+        if not m:
+            errors.append({
+                "line": line_no,
+                "message": f"锚点第{line_no}行：日期时刻应为 “YYYY-MM-DD HH:MM”（24 小时制，精确到分钟），得到 “{dt_s}”。",
+            })
+            continue
+
+        year, month, day, hour, minute = (int(g) for g in m.groups())
+        try:
+            dt = datetime(year, month, day, hour, minute)
+        except ValueError:
+            errors.append({
+                "line": line_no,
+                "message": f"锚点第{line_no}行：日期时刻 “{dt_s}” 不存在（请检查月份、日期与时分是否越界）。",
+            })
+            continue
+
+        anchors.append(Anchor(line_no, name, _dt_to_minute(dt), _minute_to_text(_dt_to_minute(dt)) or dt_s))
+
+    return anchors, errors
+
+
+def solve_anchored(text: str, anchors_text: str) -> dict:
+    """绝对时间锚定：区间约束与锚点等式联立。
+
+    每个锚点换算为相对统一零点（0001-01-01 00:00，无时区本地时间）的分钟数 M，
+    引入零点节点 ZERO 与一对等式边（ZERO->事件 权 M、事件->ZERO 权 -M），与区间行
+    复用同一套差分约束 Bellman-Ford 联立；同名锚点重复也作为两条等式参与判定，
+    时刻不同即构成负环。负环还原的闭合矛盾链同时含区间行号、锚点行号与所用界值。
+
+    可解时不取任何任意平移的可行解充当真实日期：对每个事件用冗余核对同款单源
+    最短路求其相对零点的最紧下界/上界，仅当两端都有界（与锚点连通）时给出绝对
+    日期时刻（下界==上界为精确点，否则为范围），其余事件标为“未定位”。
+    """
+    errors: list[dict] = []
+    rows: list[Row] = []
+    if text and text.strip():
+        rows, errors = parse_text(text)  # 复用现有区间校验；区间文本留空即纯锚点模式
+    anchors, anchor_errors = parse_anchors(anchors_text)
+    errors = errors + anchor_errors
+    if errors:
+        return {"status": "error", "errors": errors}
+    if not rows and not anchors:
+        # parse_anchors 对空文本已报错，正常不会走到；防御性返回
+        return {"status": "error", "errors": [{"line": None, "message": "没有可联立的区间约束或锚点。"}]}
+
+    # 区间行复用现有建边逻辑，再补入零点节点与每个锚点的等式边
+    names, index, edges = _build_graph(rows)
+    index[ZERO_NODE] = len(names)
+    names.append(ZERO_NODE)
+    iz = index[ZERO_NODE]
+    for a in anchors:
+        ie = index.get(a.event)
+        if ie is None:
+            ie = len(names)
+            index[a.event] = ie
+            names.append(a.event)
+        edges.append(Edge(iz, ie, a.minute, a.line, "anchor", a.minute, "anchor", a.text))
+        edges.append(Edge(ie, iz, -a.minute, a.line, "anchor", a.minute, "anchor", a.text))
+
+    dist, pred, last_relaxed = _relax_all(names, edges)
+    if last_relaxed is not None:
+        return _conflict_result(names, pred, last_relaxed, len(names))
+
+    # 每个事件相对零点的最紧界：上界 = ZERO->事件 最短路；下界 = -(事件->ZERO 最短路)。
+    # 反向图上从 ZERO 跑一次最短路即得全部“事件->ZERO”距离。
+    upper_dist, _ = _bellman_ford(names, edges, iz)
+    rev_edges = [Edge(e.v, e.u, e.w, e.line, e.kind, e.bound, e.source, e.label) for e in edges]
+    lower_dist, _ = _bellman_ford(names, rev_edges, iz)
+
+    events: list[dict] = []
+    for i, name in enumerate(names):
+        if name == ZERO_NODE:
+            continue
+        ub, lb = upper_dist[i], lower_dist[i]
+        if ub is None or lb is None:
+            # 与零点不连通（独立事件组件）：只有相对区间，不编造任何绝对日期
+            events.append({
+                "event": name,
+                "located": False,
+                "minute_low": None,
+                "minute_high": None,
+                "abs_low": None,
+                "abs_high": None,
+                "exact": False,
+            })
+            continue
+        lo, hi = -lb, ub
+        events.append({
+            "event": name,
+            "located": True,
+            "minute_low": lo,
+            "minute_high": hi,
+            "abs_low": _minute_to_text(lo),
+            "abs_high": _minute_to_text(hi),
+            "exact": lo == hi,
+        })
+
+    # 已定位事件按最早时刻排序在前，未定位事件按名称排序在后
+    events.sort(key=lambda e: (not e["located"], e["minute_low"] if e["minute_low"] is not None else 0, e["event"]))
+    located_count = sum(1 for e in events if e["located"])
+
+    return {
+        "status": "ok",
+        "anchors": [
+            {"line": a.line, "event": a.event, "time": a.text, "minute": a.minute}
+            for a in anchors
+        ],
+        "events": events,
+        "event_count": len(events),
+        "located_count": located_count,
+        "anchor_count": len(anchors),
         "line_count": len(rows),
     }
